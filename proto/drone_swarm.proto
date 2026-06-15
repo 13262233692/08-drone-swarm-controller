@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package drone_swarm;
+
+service TelemetryService {
+  rpc SendTelemetry(TelemetryRequest) returns (TelemetryResponse);
+  rpc StreamTelemetry(stream TelemetryRequest) returns (stream CommandResponse);
+}
+
+service CommandService {
+  rpc GetCommand(CommandRequest) returns (CommandResponse);
+  rpc StreamCommands(CommandRequest) returns (stream CommandResponse);
+}
+
+message Vector3 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+message EulerAngles {
+  float roll = 1;
+  float pitch = 2;
+  float yaw = 3;
+}
+
+message TelemetryRequest {
+  string drone_id = 1;
+  double latitude = 2;
+  double longitude = 3;
+  float altitude = 4;
+  EulerAngles attitude = 5;
+  float battery_level = 6;
+  Vector3 velocity = 7;
+  int64 timestamp = 8;
+}
+
+message TelemetryResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CommandRequest {
+  string drone_id = 1;
+}
+
+message CommandResponse {
+  string drone_id = 1;
+  Vector3 target_velocity = 2;
+  Vector3 target_position = 3;
+  float separation_force = 4;
+  float alignment_force = 5;
+  float cohesion_force = 6;
+  int64 timestamp = 7;
+  string command_id = 8;
+}
