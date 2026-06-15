@@ -16,10 +16,14 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_db: int = 0
     redis_password: Optional[str] = None
+    redis_max_connections: int = 200
+    redis_socket_timeout: int = 5
+    redis_connect_timeout: int = 5
 
     geohash_precision: int = 8
     telemetry_ttl: int = 30
     command_ttl: int = 10
+    max_stale_data_ms: int = 1000
 
     boids_separation_distance: float = 50.0
     boids_alignment_distance: float = 100.0
