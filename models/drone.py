@@ -1,6 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, List
 from datetime import datetime
+from enum import Enum
 
 
 class Vector3(BaseModel):
@@ -34,6 +35,9 @@ class DroneCommand(BaseModel):
     separation_force: float = 0.0
     alignment_force: float = 0.0
     cohesion_force: float = 0.0
+    fence_force: float = 0.0
+    fence_active: bool = False
+    violating_fences: List[str] = []
     timestamp: int = 0
     command_id: str = ""
 
@@ -63,3 +67,61 @@ class DroneStatus(BaseModel):
     battery_level: float
     is_online: bool
     last_update: datetime
+
+
+class FenceType(str, Enum):
+    EXCLUSION = "exclusion"
+    INCLUSION = "inclusion"
+    TEMPORARY = "temporary"
+
+
+class FencePriority(int, Enum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+    CRITICAL = 4
+    MILITARY = 5
+
+
+class GeoPoint(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class GeoFence(BaseModel):
+    fence_id: str
+    name: str
+    fence_type: FenceType = FenceType.EXCLUSION
+    priority: FencePriority = FencePriority.HIGH
+    polygon: List[GeoPoint]
+    min_altitude: float = 0.0
+    max_altitude: float = 1000.0
+    enabled: bool = True
+    expire_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    repulsion_force: float = 50.0
+    warning_distance_meters: float = 100.0
+    emergency_distance_meters: float = 30.0
+
+
+class FenceViolation(BaseModel):
+    drone_id: str
+    fence_id: str
+    fence_name: str
+    violation_type: str
+    latitude: float
+    longitude: float
+    altitude: float
+    distance_to_boundary: float
+    predicted_collision_seconds: float
+    timestamp: int
+    severity: str
+
+
+class FenceRepulsionResult(BaseModel):
+    drone_id: str
+    repulsion_force: Vector3
+    is_active: bool
+    active_fences: List[str]
+    violating_fences: List[str]
+    warnings: List[FenceViolation]

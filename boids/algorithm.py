@@ -1,13 +1,20 @@
 import math
 import time
 import uuid
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Dict
 from config import settings
-from models.drone import DroneTelemetry, DroneCommand, Vector3
+from models.drone import (
+    DroneTelemetry,
+    DroneCommand,
+    Vector3,
+    FenceRepulsionResult,
+    FencePriority,
+)
+from geofencing.engine import GeoFencingEngine
 
 
 class BoidsAlgorithm:
-    def __init__(self):
+    def __init__(self, fence_engine: Optional[GeoFencingEngine] = None):
         self.separation_distance = settings.boids_separation_distance
         self.alignment_distance = settings.boids_alignment_distance
         self.cohesion_distance = settings.boids_cohesion_distance
@@ -16,6 +23,11 @@ class BoidsAlgorithm:
         self.cohesion_weight = settings.boids_cohesion_weight
         self.max_speed = settings.boids_max_speed
         self.max_force = settings.boids_max_force
+
+        self.fence_engine = fence_engine or GeoFencingEngine()
+        self._fence_override_threshold = 5.0
+        self._fence_emergency_override = True
+        self._last_fence_results: Dict[str, FenceRepulsionResult] = {}
 
     def _latlon_to_meters(self, lat: float, lon: float, ref_lat: float, ref_lon: float) -> Tuple[float, float]:
         R = 6371000.0
@@ -183,11 +195,34 @@ class BoidsAlgorithm:
         cohesion.y *= self.cohesion_weight
         cohesion.z *= self.cohesion_weight
 
-        total_force = Vector3(
-            x=separation.x + alignment.x + cohesion.x,
-            y=separation.y + alignment.y + cohesion.y,
-            z=separation.z + alignment.z + cohesion.z
+        fence_result = self.fence_engine.evaluate_drone(drone)
+        self._last_fence_results[drone.drone_id] = fence_result
+
+        fence_force = fence_result.repulsion_force
+        fence_magnitude = math.sqrt(fence_force.x ** 2 + fence_force.y ** 2 + fence_force.z ** 2)
+
+        has_critical_violation = any(
+            w.severity in ("critical", "emergency") for w in fence_result.warnings
         )
+
+        if has_critical_violation and self._fence_emergency_override:
+            total_force = Vector3(
+                x=fence_force.x,
+                y=fence_force.y,
+                z=fence_force.z,
+            )
+        elif fence_magnitude > self._fence_override_threshold:
+            total_force = Vector3(
+                x=fence_force.x * 0.7 + (separation.x + alignment.x + cohesion.x) * 0.3,
+                y=fence_force.y * 0.7 + (separation.y + alignment.y + cohesion.y) * 0.3,
+                z=fence_force.z * 0.7 + (separation.z + alignment.z + cohesion.z) * 0.3,
+            )
+        else:
+            total_force = Vector3(
+                x=separation.x + alignment.x + cohesion.x + fence_force.x,
+                y=separation.y + alignment.y + cohesion.y + fence_force.y,
+                z=separation.z + alignment.z + cohesion.z + fence_force.z,
+            )
 
         target_velocity = Vector3(
             x=drone.velocity.x + total_force.x,
@@ -195,7 +230,11 @@ class BoidsAlgorithm:
             z=drone.velocity.z + total_force.z
         )
 
-        target_velocity = self._limit_vector(target_velocity, self.max_speed)
+        max_speed_override = self.max_speed
+        if has_critical_violation:
+            max_speed_override = self.max_speed * 1.5
+
+        target_velocity = self._limit_vector(target_velocity, max_speed_override)
 
         lat_offset = target_velocity.y * 0.00001
         lon_offset = target_velocity.x * 0.00001
@@ -210,15 +249,23 @@ class BoidsAlgorithm:
         alignment_mag = math.sqrt(alignment.x ** 2 + alignment.y ** 2 + alignment.z ** 2)
         cohesion_mag = math.sqrt(cohesion.x ** 2 + cohesion.y ** 2 + cohesion.z ** 2)
 
-        return DroneCommand(
+        command = DroneCommand(
             drone_id=drone.drone_id,
             target_velocity=target_velocity,
             target_position=target_position,
             separation_force=separation_mag,
             alignment_force=alignment_mag,
             cohesion_force=cohesion_mag,
+            fence_force=fence_magnitude,
+            fence_active=fence_result.is_active,
+            violating_fences=fence_result.violating_fences,
             command_id=str(uuid.uuid4())
         )
+
+        return command
+
+    def get_fence_result(self, drone_id: str) -> Optional[FenceRepulsionResult]:
+        return self._last_fence_results.get(drone_id)
 
     def compute_all_commands(self, drones: List[DroneTelemetry]) -> List[DroneCommand]:
         commands = []

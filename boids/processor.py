@@ -5,13 +5,15 @@ from collections import deque
 from config import settings
 from redis_manager.state_manager import RedisStateManager
 from boids.algorithm import BoidsAlgorithm
-from models.drone import DroneCommand, DroneTelemetry
+from geofencing.manager import GeoFenceManager
+from models.drone import DroneCommand, DroneTelemetry, Vector3
 
 
 class BoidsProcessor:
     def __init__(self):
         self.redis_manager = RedisStateManager()
-        self.boids = BoidsAlgorithm()
+        self.fence_manager = GeoFenceManager()
+        self.boids = BoidsAlgorithm(fence_engine=self.fence_manager.engine)
         self.running = False
         self.process = None
 
@@ -19,6 +21,7 @@ class BoidsProcessor:
         self._state_buffer = deque(maxlen=5)
         self._last_process_time = 0
         self._stats_window = deque(maxlen=100)
+        self._violation_count = 0
 
     def start(self):
         if self.running:
@@ -66,9 +69,13 @@ class BoidsProcessor:
                     avg_time = sum(self._stats_window) / len(self._stats_window)
                     max_time = max(self._stats_window)
                     pool_stats = self.redis_manager.get_pool_stats()
+                    active_fences = len(self.fence_manager.get_all_fences())
+                    fence_active_count = sum(1 for c in commands if c.fence_active) if commands else 0
                     print(
                         f"[Boids] Stats: avg={avg_time*1000:.1f}ms, max={max_time*1000:.1f}ms, "
-                        f"drones={len(drones)}, pool={pool_stats['current_connections']}/{pool_stats['max_connections']}"
+                        f"drones={len(drones)}, fences={active_fences}, evading={fence_active_count}, "
+                        f"violations={self._violation_count}, "
+                        f"pool={pool_stats['current_connections']}/{pool_stats['max_connections']}"
                     )
 
                 sleep_time = max(0, settings.boids_process_interval - elapsed)
@@ -103,13 +110,37 @@ class BoidsProcessor:
             if i < len(drones):
                 cmd.timestamp = max(cmd.timestamp, drones[i].timestamp)
 
+            if cmd.fence_active:
+                fence_result = self.boids.get_fence_result(cmd.drone_id)
+                if fence_result:
+                    for warning in fence_result.warnings:
+                        self.fence_manager.log_violation(warning.model_dump(mode="json"))
+                        self._violation_count += 1
+
         return commands
 
     def _process_single_drone(self, drones: List[DroneTelemetry]) -> List[DroneCommand]:
         commands = []
         for drone in drones:
-            target_velocity = drone.velocity
-            target_position = drone
+            fence_result = self.fence_manager.evaluate_drone(drone)
+
+            fence_force = fence_result.repulsion_force
+            fence_magnitude = (fence_force.x ** 2 + fence_force.y ** 2 + fence_force.z ** 2) ** 0.5
+
+            target_velocity = Vector3(
+                x=drone.velocity.x + fence_force.x,
+                y=drone.velocity.y + fence_force.y,
+                z=drone.velocity.z + fence_force.z,
+            )
+
+            lat_offset = target_velocity.y * 0.00001
+            lon_offset = target_velocity.x * 0.00001
+
+            target_position = Vector3(
+                x=drone.longitude + lon_offset,
+                y=drone.latitude + lat_offset,
+                z=drone.altitude + target_velocity.z,
+            )
 
             cmd = DroneCommand(
                 drone_id=drone.drone_id,
@@ -118,6 +149,15 @@ class BoidsProcessor:
                 separation_force=0.0,
                 alignment_force=0.0,
                 cohesion_force=0.0,
+                fence_force=fence_magnitude,
+                fence_active=fence_result.is_active,
+                violating_fences=fence_result.violating_fences,
             )
             commands.append(cmd)
+
+            if fence_result.is_active:
+                for warning in fence_result.warnings:
+                    self.fence_manager.log_violation(warning.model_dump(mode="json"))
+                    self._violation_count += 1
+
         return commands

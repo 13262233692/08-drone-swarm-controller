@@ -4,12 +4,16 @@ from datetime import datetime
 
 from config import settings
 from redis_manager.state_manager import RedisStateManager
+from geofencing.manager import GeoFenceManager
 from models.drone import (
     SwarmMission,
     MissionResponse,
     DroneStatus,
     DroneTelemetry,
     DroneCommand,
+    GeoFence,
+    FenceRepulsionResult,
+    FenceViolation,
 )
 
 app = FastAPI(
@@ -19,6 +23,7 @@ app = FastAPI(
 )
 
 redis_manager = RedisStateManager()
+fence_manager = GeoFenceManager()
 
 
 @app.get("/")
@@ -192,5 +197,148 @@ async def receive_telemetry(drone_id: str, telemetry: DroneTelemetry):
             raise HTTPException(status_code=500, detail="Failed to process telemetry")
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/geofences", response_model=dict)
+async def create_geofence(fence: GeoFence):
+    try:
+        if len(fence.polygon) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Polygon must have at least 3 points",
+            )
+        success = fence_manager.add_fence(fence)
+        if success:
+            return {
+                "status": "success",
+                "fence_id": fence.fence_id,
+                "message": f"Geo-fence '{fence.name}' created successfully",
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create geo-fence")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/geofences", response_model=List[GeoFence])
+async def list_geofences():
+    try:
+        return fence_manager.get_all_fences()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/geofences/{fence_id}", response_model=GeoFence)
+async def get_geofence(fence_id: str):
+    try:
+        fence = fence_manager.get_fence(fence_id)
+        if fence:
+            return fence
+        else:
+            raise HTTPException(status_code=404, detail=f"Geo-fence {fence_id} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/geofences/{fence_id}", response_model=dict)
+async def update_geofence(fence_id: str, fence: GeoFence):
+    try:
+        if fence_id != fence.fence_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Fence ID in path does not match body",
+            )
+        if len(fence.polygon) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Polygon must have at least 3 points",
+            )
+        success = fence_manager.update_fence(fence)
+        if success:
+            return {
+                "status": "success",
+                "fence_id": fence.fence_id,
+                "message": f"Geo-fence '{fence.name}' updated successfully",
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update geo-fence")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/geofences/{fence_id}", response_model=dict)
+async def delete_geofence(fence_id: str):
+    try:
+        success = fence_manager.remove_fence(fence_id)
+        if success:
+            return {
+                "status": "success",
+                "message": f"Geo-fence {fence_id} deleted successfully",
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete geo-fence")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/geofences", response_model=dict)
+async def clear_all_geofences():
+    try:
+        success = fence_manager.clear_all_fences()
+        if success:
+            return {
+                "status": "success",
+                "message": "All geo-fences cleared successfully",
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to clear geo-fences")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/geofences/violations/recent", response_model=List[dict])
+async def get_recent_violations(limit: int = 100):
+    try:
+        return fence_manager.get_violations(limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/drones/{drone_id}/fence-status", response_model=FenceRepulsionResult)
+async def get_drone_fence_status(drone_id: str):
+    try:
+        telemetry = redis_manager.get_telemetry(drone_id)
+        if not telemetry:
+            raise HTTPException(status_code=404, detail=f"Drone {drone_id} not found")
+        result = fence_manager.evaluate_drone(telemetry)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/geofences/reload", response_model=dict)
+async def reload_geofences_from_redis():
+    try:
+        fence_manager.reload_from_redis()
+        count = len(fence_manager.get_all_fences())
+        return {
+            "status": "success",
+            "message": f"Reloaded {count} geo-fences from Redis",
+            "active_fences": count,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
